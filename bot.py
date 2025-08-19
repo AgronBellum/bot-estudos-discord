@@ -395,75 +395,71 @@ class QuestionView(discord.ui.View):
                 self.add_item(AnswerButton(label=letter, style=style, custom_id=letter, key=key))
 
 class AnswerButton(discord.ui.Button):
-    def __init__(self, label: str, style: discord.ButtonStyle, custom_id: str, key: Tuple[int, int, int]):
-        super().__init__(label=label, style=style, custom_id=custom_id)
-        self.sim_key = key
+    def __init__(self, label: str, idx: int):
+        super().__init__(label=label, style=discord.ButtonStyle.primary)
+        self.idx = idx
 
     async def callback(self, interaction: discord.Interaction):
-        sess = sim_sessions.get(self.sim_key)
-        if not sess:
-            return await interaction.response.send_message("⌛ Sessão expirada. Inicie um novo simulado.", ephemeral=True)
-        if interaction.user.id != self.sim_key[2]:
-            return await interaction.response.send_message("⚠️ Este simulado pertence a outro usuário.", ephemeral=True)
+        user_id = str(interaction.user.id)
+        session = sim_sessions.get(user_id)
 
-        idx = sess["index"]
-        q = sess["data"]["questoes"][idx]
-        formato = sess["data"]["formato"]
+        if not session:
+            await interaction.response.send_message("⚠️ Sessão não encontrada.", ephemeral=True)
+            return
 
-        # Processamento da resposta
-        if formato == "certo_errado":
-            user_answer = "Certo" if self.custom_id == "CERTO" else "Errado"
-            correct = q["correta"]
-            user_label = user_answer
-            correct_label = correct
-        else:
-            user_answer = self.custom_id.upper()
-            correct = q["correta"].upper()
+        idx = session["current"]
+        q = session["questions"][idx]
 
-            # Obtém o texto completo das alternativas selecionadas
-            user_label = next(
-                (opt for opt in q["opcoes"] if str(opt).startswith(f"{user_answer})")),
-                f"{user_answer}) [Alternativa não encontrada]"
-            )
-            correct_label = next(
-                (opt for opt in q["opcoes"] if str(opt).startswith(f"{correct})")),
-                f"{correct}) [Alternativa não encontrada]"
-            )
+        # Resposta do usuário
+        user_answer = self.label.split(")")[0]  # extrai só a letra A, B, C...
+        correct = q["correta"].upper()
 
+        # Obtém o texto completo das alternativas selecionadas
+        user_label = next(
+            (opt for opt in q["opcoes"] if str(opt).startswith(f"{user_answer})")),
+            f"{user_answer}) [Alternativa não encontrada]"
+        )
+        correct_label = next(
+            (opt for opt in q["opcoes"] if str(opt).startswith(f"{correct})")),
+            f"{correct}) [Alternativa não encontrada]"
+        )
+
+        # Confere se acertou
         correct_bool = (user_answer == correct)
 
+        # Pós-processa comentário para ficar didático
+        comentario_texto = q.get("comentario", "Sem comentário disponível")
+        if comentario_texto:
+            comentario_texto = "📘 Explicação didática: " + comentario_texto
+
         # Atualização da sessão
-        sess["answers"].append({
+        session["answers"].append({
             "idx": idx,
             "user": user_answer,
             "user_label": user_label,
             "correct": correct,
             "correct_label": correct_label,
             "ok": correct_bool,
-            "comentario": q.get("comentario", "Sem comentário disponível")
+            "comentario": comentario_texto
         })
-        
-        if correct_bool:
-            sess["score"] += 1
 
+        session["current"] += 1
 
-        # Construção do feedback detalhado
-        feedback_msg = [
-            f"## {'✅ Correto!' if correct_bool else '❌ Incorreto'}",
-            f"**Sua resposta:** {user_label}",
-            f"**Resposta correta:** {correct_label}",
-            "",
-            f"📝 **Comentário:**\n{q.get('comentario', 'Sem fundamentação disponível')}"
-        ]
+        # Se ainda há questão, envia a próxima
+        if session["current"] < len(session["questions"]):
+            next_q = session["questions"][session["current"]]
+            view = QuestionView(next_q, session["current"])
+            await interaction.response.send_message(
+                f"**Questão {session['current']+1}:** {next_q['enunciado']}",
+                view=view,
+                ephemeral=True
+            )
+        else:
+            await interaction.response.send_message(
+                "✅ Você finalizou o simulado! Use `!resultado` para ver seu desempenho.",
+                ephemeral=True
+            )
 
-        # Adiciona alternativas se for múltipla escolha
-        if formato != "certo_errado":
-            feedback_msg.insert(3, "\n**Todas as alternativas:**\n" + "\n".join(q["opcoes"]))
-
-        await interaction.response.send_message(
-            "\n".join(feedback_msg),
-            ephemeral=True
-        )
 
         # Próxima questão ou finalização
         sess["index"] += 1
