@@ -419,14 +419,18 @@ class AnswerButton(discord.ui.Button):
         else:
             user_answer = self.custom_id.upper()
             correct = q["correta"].upper()
-            # Obtém o texto completo das alternativas selecionadas
-            user_label = next(
-    (opt for opt in q["opcoes"] if opt.startswith(user_answer + ")")),
+            
+          # Obtém o texto completo das alternativas selecionadas
+user_label = next(
+    (opt for opt in q["opcoes"] if str(opt).startswith(f"{user_answer})")),
     f"{user_answer}) [Alternativa não encontrada]"
 )
-            correct_label = next((opt for opt in q["opcoes"] if opt.startswith(correct + ")"), f"{correct}) [Alternativa não encontrada]")
+correct_label = next(
+    (opt for opt in q["opcoes"] if str(opt).startswith(f"{correct})")),
+    f"{correct}) [Alternativa não encontrada]"
+)
 
-        correct_bool = (user_answer == correct)
+correct_bool = (user_answer == correct)
 
         # Atualização da sessão
         sess["answers"].append({
