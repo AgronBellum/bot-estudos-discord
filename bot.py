@@ -566,6 +566,205 @@ async def simulado(ctx: commands.Context, banca: str, *, tema: str = "geral"):
     except Exception as e:
         log_error(e, "comando_simulado")
         await ctx.send("💥 Falha crítica ao criar simulado. Os desenvolvedores foram notificados.")
+# ==========================================
+# CLASSES DE INTERFACE (BOTÕES / VIEW) - CORRIGIDAS
+# ==========================================
+
+class AnswerButton(discord.ui.Button):
+    def __init__(self, label: str, custom_id: str):
+        super().__init__(label=label, style=discord.ButtonStyle.primary, custom_id=custom_id)
+
+    async def callback(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        session = sim_sessions.get(user_id)
+
+        if not session or session["current"] >= len(session["questions"]):
+            await interaction.response.send_message("⚠️ Sessão não encontrada ou expirada.", ephemeral=True)
+            return
+
+        current_idx = session["current"]
+        current_question = session["questions"][current_idx]
+
+        # Processa resposta
+        user_answer = self.custom_id
+        correct_answer = current_question["correta"]
+        is_correct = (user_answer.upper() == correct_answer.upper())
+
+        # Encontra os textos completos das alternativas
+        user_option = next((opt for opt in current_question["opcoes"] if opt.startswith(f"{user_answer})")), f"{user_answer}) [não encontrada]")
+        correct_option = next((opt for opt in current_question["opcoes"] if opt.startswith(f"{correct_answer})")), f"{correct_answer}) [não encontrada]")
+
+        # Registra resposta
+        session["answers"].append({
+            "question_idx": current_idx,
+            "user_answer": user_answer,
+            "user_option": user_option,
+            "correct_answer": correct_answer,
+            "correct_option": correct_option,
+            "is_correct": is_correct,
+            "comentario": current_question.get("comentario", "Sem comentário disponível")
+        })
+
+        session["current"] += 1
+
+        # Responde à interação
+        if is_correct:
+            await interaction.response.send_message("✅ Resposta correta!", ephemeral=True)
+        else:
+            await interaction.response.send_message(f"❌ Resposta incorreta. A correta era: {correct_option}", ephemeral=True)
+
+        # Prepara próxima questão ou finaliza
+        if session["current"] < len(session["questions"]):
+            # Agenda o envio da próxima questão
+            asyncio.create_task(enviar_proxima_questao(interaction, user_id))
+        else:
+            # Finaliza o simulado
+            asyncio.create_task(finalizar_simulado(interaction, user_id))
+
+async def enviar_proxima_questao(interaction: discord.Interaction, user_id: str):
+    """Envia a próxima questão após um pequeno delay"""
+    await asyncio.sleep(2)  # Pequeno delay para feedback visual
+    
+    session = sim_sessions.get(user_id)
+    if not session or session["current"] >= len(session["questions"]):
+        return
+
+    current_idx = session["current"]
+    question = session["questions"][current_idx]
+    
+    view = QuestionView(question, current_idx)
+    
+    # Envia a próxima questão no canal original
+    channel = interaction.channel
+    await channel.send(f"**Questão {current_idx + 1}:** {question['enunciado']}", view=view)
+
+async def finalizar_simulado(interaction: discord.Interaction, user_id: str):
+    """Finaliza o simulado e mostra resultados"""
+    await asyncio.sleep(2)
+    
+    session = sim_sessions.get(user_id)
+    if not session:
+        return
+
+    channel = interaction.channel
+    await channel.send("🎉 **Simulado finalizado!** Use `!resultado` para ver seu desempenho.")
+
+class QuestionView(discord.ui.View):
+    def __init__(self, question: Dict[str, Any], question_idx: int):
+        super().__init__(timeout=180)  # 3 minutos de timeout
+        self.question_idx = question_idx
+        
+        # Adiciona botões para cada alternativa
+        for option in question["opcoes"]:
+            letter = option.split(")")[0].strip()
+            self.add_item(AnswerButton(label=option, custom_id=letter))
+
+# ==========================================
+# COMANDOS DO BOT - CORRIGIDOS
+# ==========================================
+
+@bot.command(name="simulado")
+async def simulado(ctx: commands.Context, qtd: int = 5):
+    """Inicia um simulado com N questões (default = 5)"""
+    user_id = str(ctx.author.id)
+
+    # Limita a quantidade de questões
+    qtd = max(1, min(qtd, 10))  # Entre 1 e 10 questões
+
+    # Verifica se já existe sessão
+    if user_id in sim_sessions:
+        await ctx.send("⚠️ Você já tem um simulado em andamento. Finalize-o primeiro.")
+        return
+
+    await ctx.send("📚 Gerando questões, aguarde...")
+
+    questions = await gerar_questoes(qtd)
+    if not questions:
+        await ctx.send("💥 Erro ao gerar questões. Tente novamente.")
+        return
+
+    # Inicia nova sessão
+    sim_sessions[user_id] = {
+        "questions": questions,
+        "current": 0,
+        "answers": [],
+        "start_time": discord.utils.utcnow()
+    }
+
+    # Envia primeira questão
+    first_question = questions[0]
+    view = QuestionView(first_question, 0)
+    
+    embed = discord.Embed(
+        title="📝 Simulado Iniciado",
+        description=f"**Questão 1/{len(questions)}**\n{first_question['enunciado']}",
+        color=discord.Color.blue()
+    )
+    
+    await ctx.send(embed=embed, view=view)
+
+@bot.command(name="resultado")
+async def resultado(ctx: commands.Context):
+    """Mostra o resultado do simulado atual"""
+    user_id = str(ctx.author.id)
+    session = sim_sessions.get(user_id)
+
+    if not session:
+        await ctx.send("⚠️ Você não tem simulado em andamento. Use `!simulado` para começar.")
+        return
+
+    answers = session["answers"]
+    total_questions = len(session["questions"])
+    
+    if not answers or len(answers) < total_questions:
+        await ctx.send("⚠️ Você ainda não completou o simulado. Continue respondendo as questões.")
+        return
+
+    # Calcula resultados
+    correct_answers = sum(1 for a in answers if a["is_correct"])
+    score_percentage = (correct_answers / total_questions) * 100
+    
+    # Cria embed com resultados
+    embed = discord.Embed(
+        title="📊 Resultado do Simulado",
+        description=f"**{ctx.author.display_name}** - {correct_answers}/{total_questions} acertos ({score_percentage:.1f}%)",
+        color=discord.Color.green() if score_percentage >= 70 else discord.Color.orange() if score_percentage >= 50 else discord.Color.red()
+    )
+    
+    # Adiciona detalhes por questão
+    for i, answer in enumerate(answers):
+        status = "✅" if answer["is_correct"] else "❌"
+        embed.add_field(
+            name=f"Questão {i+1} {status}",
+            value=f"""**Sua resposta:** {answer['user_option']}
+**Resposta correta:** {answer['correct_option']}
+**Explicação:** {answer['comentario']}""",
+            inline=False
+        )
+    
+    # Limita a 25 fields (limite do Discord)
+    if len(embed.fields) > 25:
+        embed = discord.Embed(
+            title="📊 Resultado do Simulado (Resumo)",
+            description=f"**{correct_answers}/{total_questions}** acertos ({score_percentage:.1f}%)",
+            color=embed.color
+        )
+        embed.add_field(name="Detalhes", value="*Muitas questões para mostrar detalhadamente*", inline=False)
+    
+    await ctx.send(embed=embed)
+    
+    # Limpa a sessão
+    sim_sessions.pop(user_id, None)
+
+@bot.command(name="cancelar")
+async def cancelar_simulado(ctx: commands.Context):
+    """Cancela o simulado atual"""
+    user_id = str(ctx.author.id)
+    if user_id in sim_sessions:
+        sim_sessions.pop(user_id)
+        await ctx.send("❌ Simulado cancelado.")
+    else:
+        await ctx.send("⚠️ Você não tem simulado em andamento.")
 
 # =============================
 # Tratamento de Erros Global
