@@ -4,11 +4,11 @@ import re
 import json
 import random
 import asyncio
+import unicodedata
 from typing import Dict, Any, List, Tuple
 
 import discord
 from discord.ext import commands
-from discord import app_commands
 
 from groq import Groq
 from dotenv import load_dotenv
@@ -145,16 +145,45 @@ server_structure = {
 }
 
 # =============================
-# Util: IA chat helper
+# Utilidades
 # =============================
-async def chat_groq(messages: List[Dict[str, str]], max_tokens: int = 700, temperature: float = 0.6) -> str:
+def slugify_channel_name(name: str) -> str:
+    """
+    Converte nomes de canal para um formato válido no Discord:
+    - remove emojis e acentos
+    - minúsculas
+    - mantém apenas a-z, 0-9 e hífen
+    - remove hífens duplicados/bordas
+    """
+    # remove emojis/letras fora do BMP: apenas normaliza/remover marcas
+    nfkd = unicodedata.normalize("NFKD", name)
+    # remove diacríticos
+    s = "".join(ch for ch in nfkd if not unicodedata.combining(ch))
+    s = s.lower()
+    # troca espaços por hífen
+    s = re.sub(r"\s+", "-", s)
+    # remove tudo que não for a-z, 0-9, hífen
+    s = re.sub(r"[^a-z0-9\-]", "-", s)
+    # remove hífens repetidos
+    s = re.sub(r"-{2,}", "-", s)
+    # tira hífens das pontas
+    s = s.strip("-")
+    # fallback caso vire vazio
+    return s or "canal"
+
+# =============================
+# Util: IA chat helper (SÍNCRONA)
+# =============================
+def chat_groq(messages: List[Dict[str, str]], max_tokens: int = 700, temperature: float = 0.6) -> str:
+    """
+    Função síncrona para chamada Groq. Use com asyncio.to_thread no código assíncrono.
+    """
     resp = groq_client.chat.completions.create(
         model=GROQ_MODEL,
         messages=messages,
         temperature=temperature,
         max_tokens=max_tokens,
     )
-    # Groq SDK: choices[0].message.content
     return resp.choices[0].message.content
 
 # =============================
@@ -178,6 +207,7 @@ async def on_message(message: discord.Message):
 
         try:
             msgs = [{"role": "system", "content": BASE_PROMPT}, *conversation_history]
+            # roda a chamada bloqueante em thread
             reply = await asyncio.to_thread(chat_groq, msgs, 500, 0.6)
 
             # 10% com piada
@@ -186,7 +216,8 @@ async def on_message(message: discord.Message):
 
             await message.channel.send(reply)
         except Exception as e:
-            await message.channel.send(f"⚠️ Erro ao gerar resposta: {e}")
+            print(f"[on_message] ERRO: {e}")
+            await message.channel.send("💥 Erro interno! Já registrei aqui no console.")
 
     await bot.process_commands(message)
 
@@ -204,16 +235,21 @@ async def piada(ctx: commands.Context):
 @commands.has_permissions(administrator=True)
 async def setup(ctx: commands.Context):
     guild = ctx.guild
+    if not guild:
+        return await ctx.send("⚠️ Rode este comando dentro de um servidor.")
+    created = 0
     for category_name, channels in server_structure.items():
+        # categorias podem ter emoji/acentos
         category = discord.utils.get(guild.categories, name=category_name)
         if not category:
             category = await guild.create_category(category_name)
-        for channel_name in channels:
-            # discord transforma em slug; vamos comparar pelo 'name' mesmo
-            existing = discord.utils.get(category.channels, name=channel_name)
+        for original_name in channels:
+            slug = slugify_channel_name(original_name)
+            existing = discord.utils.get(category.channels, name=slug)
             if not existing:
-                await guild.create_text_channel(channel_name, category=category)
-    await ctx.send("✅ Estrutura de estudos criada com sucesso!")
+                await guild.create_text_channel(slug, category=category)
+                created += 1
+    await ctx.send(f"✅ Estrutura de estudos criada/atualizada! ({created} canais criados)")
 
 # =============================
 # SIMULADO: IA + Embed + Botões
@@ -229,17 +265,13 @@ def extract_json(text: str) -> Any:
     - bloco ```json ... ```
     - bloco ``` ... ```
     - texto direto
-    Retorna dict carregado ou lança ValueError.
     """
-    # ```json ... ```
     m = re.search(r"```json\s*(\{.*?\})\s*```", text, flags=re.S | re.I)
     if m:
         return json.loads(m.group(1))
-    # ``` ... ```
     m = re.search(r"```+\s*(\{.*?\})\s*```+", text, flags=re.S | re.I)
     if m:
         return json.loads(m.group(1))
-    # texto cru
     return json.loads(text)
 
 def build_simulado_system_prompt() -> str:
@@ -270,7 +302,6 @@ Modelo de resposta (exemplos):
       "correta": "B",
       "comentario": "Explicação curta e referência legal."
     }
-    // total: 5 questões
   ]
 }
 
@@ -302,11 +333,12 @@ async def gerar_simulado_json(banca: str, tema: str) -> Dict[str, Any]:
         {"role": "system", "content": build_simulado_system_prompt()},
         {"role": "user", "content": user_prompt},
     ]
+    # roda a chamada bloqueante em thread
     raw = await asyncio.to_thread(chat_groq, messages, 1200, 0.4)
     try:
         data = extract_json(raw)
     except Exception:
-        # fallback: tentar forçar a IA a repetir em JSON puro
+        # fallback: pedir JSON puro novamente
         messages.append({"role": "assistant", "content": raw})
         messages.append({
             "role": "user",
@@ -318,11 +350,11 @@ async def gerar_simulado_json(banca: str, tema: str) -> Dict[str, Any]:
 
 def normalize_simulado(data: Dict[str, Any]) -> Dict[str, Any]:
     """Garante chaves esperadas e 5 questões."""
-    banca = data.get("banca", "").upper()
+    banca = (data.get("banca") or "").upper()
     formato = data.get("formato", "multipla_escolha")
     tema = data.get("tema", "geral")
     questoes = data.get("questoes", [])
-    # corta ou completa com dummy se não vier 5
+    # 5 questões
     questoes = questoes[:5]
     while len(questoes) < 5:
         questoes.append({
@@ -338,16 +370,13 @@ def normalize_simulado(data: Dict[str, Any]) -> Dict[str, Any]:
             if q.get("correta") not in ["Certo", "Errado"]:
                 q["correta"] = "Certo"
         else:
-            # 5 alternativas A–E
             ops = q.get("opcoes") or []
-            # remove prefixos A)/B) se vierem repetidos e repõe padronizado
-            ops = [re.sub(r"^[A-Ea-e]\)\s*", "", s).strip() for s in ops]
-            # garante 5
+            # remove prefixos tipo "A)" caso venham duplicados
+            ops = [re.sub(r"^[A-Ea-e]\)\s*", "", str(s)).strip() for s in ops]
             while len(ops) < 5:
                 ops.append("—")
             ops = ops[:5]
             q["opcoes"] = [f"{chr(65+i)}) {ops[i]}" for i in range(5)]
-            # corrige letra
             corr = (q.get("correta") or "A").strip().upper()
             if corr not in list("ABCDE"):
                 corr = "A"
@@ -366,7 +395,6 @@ def make_question_embed(idx: int, total: int, banca: str, tema: str, q: Dict[str
     desc = f"**Tema:** {tema}\n\n**Enunciado:** {q['enunciado']}"
     embed = discord.Embed(title=title, description=desc, color=discord.Color.blurple())
     if q.get("opcoes"):
-        # Mostrar opções
         if isinstance(q["opcoes"], list):
             opts_text = "\n".join(q["opcoes"])
         else:
@@ -376,7 +404,7 @@ def make_question_embed(idx: int, total: int, banca: str, tema: str, q: Dict[str
     return embed
 
 class QuestionView(discord.ui.View):
-    def __init__(self, key: SimKey, timeout: float = 600.0):
+    def __init__(self, key: Tuple[int, int, int], timeout: float = 600.0):
         super().__init__(timeout=timeout)
         self.key = key
         sess = sim_sessions.get(key)
@@ -397,7 +425,7 @@ class QuestionView(discord.ui.View):
                 self.add_item(AnswerButton(label=letter, style=style, custom_id=letter, key=key))
 
 class AnswerButton(discord.ui.Button):
-    def __init__(self, label: str, style: discord.ButtonStyle, custom_id: str, key: SimKey):
+    def __init__(self, label: str, style: discord.ButtonStyle, custom_id: str, key: Tuple[int, int, int]):
         super().__init__(label=label, style=style, custom_id=custom_id)
         self.sim_key = key
 
@@ -438,7 +466,6 @@ class AnswerButton(discord.ui.Button):
         # Próxima questão ou finalizar
         sess["index"] += 1
         if sess["index"] < len(sess["data"]["questoes"]):
-            # Edita a mensagem com a próxima
             next_q = sess["data"]["questoes"][sess["index"]]
             embed = make_question_embed(sess["index"], len(sess["data"]["questoes"]), sess["data"]["banca"], sess["data"]["tema"], next_q)
             await interaction.message.edit(embed=embed, view=QuestionView(self.sim_key))
@@ -461,19 +488,34 @@ class AnswerButton(discord.ui.Button):
                 correct = q["correta"] if sess["data"]["formato"] != "certo_errado" else q["correta"]
                 user = sess["answers"][i]["user"]
                 status = "✅" if sess["answers"][i]["ok"] else "❌"
-                # Mostra só prefixo do enunciado pra não lotar
                 enun = q["enunciado"].strip()
                 if len(enun) > 110:
                     enun = enun[:110] + "..."
                 lines.append(f"**Q{i+1}** {status} — Você: **{user}** | Gabarito: **{correct}**\n*{enun}*")
 
-            result.add_field(name="Gabarito", value="\n\n".join(lines), inline=False)
+            # Discord tem limite de 1024 chars por field; particiona se necessário
+            gab_text = "\n\n".join(lines)
+            if len(gab_text) <= 1024:
+                result.add_field(name="Gabarito", value=gab_text, inline=False)
+            else:
+                # quebra em blocos
+                chunks = []
+                cur = []
+                size = 0
+                for line in lines:
+                    if size + len(line) + 2 > 1024:
+                        chunks.append("\n\n".join(cur))
+                        cur, size = [], 0
+                    cur.append(line)
+                    size += len(line) + 2
+                if cur:
+                    chunks.append("\n\n".join(cur))
+                for i, ch in enumerate(chunks):
+                    result.add_field(name=("Gabarito" if i == 0 else "Gabarito (cont.)"), value=ch, inline=False)
+
             result.set_footer(text="Revisão concluída. Bora pra próxima! 🎓")
 
-            # Apaga botões
             await interaction.message.edit(embed=result, view=None)
-
-            # Limpa sessão
             sim_sessions.pop(self.sim_key, None)
 
 @bot.command()
@@ -481,8 +523,7 @@ async def simulado(ctx: commands.Context, banca: str, *, tema: str = "geral"):
     """Gera simulado por banca e tema, com botões interativos.
     Uso: !simulado FGV Direito Administrativo
     """
-    # Cria sessão única por user no canal
-    key: SimKey = (ctx.guild.id if ctx.guild else 0, ctx.channel.id, ctx.author.id)
+    key: Tuple[int, int, int] = (ctx.guild.id if ctx.guild else 0, ctx.channel.id, ctx.author.id)
     if key in sim_sessions:
         return await ctx.send("⚠️ Você já tem um simulado em andamento neste canal. Termine-o antes de iniciar outro.")
 
@@ -491,7 +532,8 @@ async def simulado(ctx: commands.Context, banca: str, *, tema: str = "geral"):
         raw_data = await gerar_simulado_json(banca, tema)
         data = normalize_simulado(raw_data)
     except Exception as e:
-        return await ctx.send(f"💥 Não consegui gerar o simulado agora. Tente novamente. Detalhe: {e}")
+        print(f"[simulado] ERRO ao gerar/parsear JSON: {e}")
+        return await ctx.send("💥 Não consegui gerar o simulado agora. Tente novamente em alguns instantes.")
 
     # Cria sessão
     sim_sessions[key] = {
@@ -517,10 +559,11 @@ async def on_command_error(ctx: commands.Context, error: commands.CommandError):
     elif isinstance(error, commands.MissingPermissions):
         await ctx.send("⛔ Você não tem permissão para executar este comando.")
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"⚠️ Faltou argumento! Exemplo: `!{ctx.command} FGV Direito Administrativo`")
+        cmd = ctx.command.qualified_name if ctx.command else "simulado"
+        await ctx.send(f"⚠️ Faltou argumento! Exemplo: `!{cmd} FGV Direito Administrativo`")
     else:
         await ctx.send("💥 Erro interno! Já registrei aqui no console.")
-        print(f"[ERRO] {error}")
+        print(f"[on_command_error] {error}")
 
 # =============================
 # Flask keep-alive (Render)
