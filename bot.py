@@ -55,15 +55,20 @@ async def on_message(message):
         # Montar mensagens para enviar ao Groq
         messages = [{"role": "system", "content": BASE_PROMPT}] + conversation_history
 
-        # Requisição ao Groq
-        response = groq_client.chat.completions.create(
-            model="llama3-70b-8192",
-            messages=messages,
-            max_tokens=500,
-        )
+        try:
+            # Requisição ao Groq
+            response = groq_client.chat.completions.create(
+                model="llama3-70b-8192",
+                messages=messages,
+                max_tokens=500,
+            )
 
-        reply = response.choices[0].message["content"]
-        await message.channel.send(reply)
+            # 🔥 CORREÇÃO AQUI
+            reply = response.choices[0].message.content
+            await message.channel.send(reply)
+
+        except Exception as e:
+            await message.channel.send(f"⚠️ Ocorreu um erro ao gerar a resposta: {str(e)}")
 
     await bot.process_commands(message)
 
