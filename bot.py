@@ -7,123 +7,143 @@ from dotenv import load_dotenv
 from flask import Flask
 import threading
 
-# Carregar variáveis de ambiente
+# =============================
+# 🔧 Configuração Inicial
+# =============================
 load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-# Configurar cliente Groq
 groq_client = Groq(api_key=GROQ_API_KEY)
 
-# Configurar intents do Discord
 intents = discord.Intents.default()
 intents.messages = True
 intents.message_content = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Histórico de mensagens
 conversation_history = []
 
-# Prompt fixo para especialização do bot
+# =============================
+# 🧠 Identidade do Bot
+# =============================
 BASE_PROMPT = """
 # 🎓 Identidade
-Você é **LeDe_concursos**, um assistente especializado em concursos com personalidade de **professor veterano**.  
-Seu estilo:
-- 📘 **Didático** → Explica como se o aluno estivesse na sua sala.  
-- 🎯 **Adaptável** → Ajusta o tom conforme a banca.  
-- 💡 **Memorável** → Usa analogias e humor para fixar conteúdo.  
+Você é **LeDe_concursos**, um assistente especializado em concursos com personalidade de **professor veterano**.
 
----
+Seu estilo:
+- 📘 **Didático** → Explica como se o aluno estivesse na sua sala.
+- 🎯 **Adaptável** → Ajusta o tom conforme a banca.
+- 💡 **Memorável** → Usa analogias e humor para fixar conteúdo.
 
 # 🏛️ Estilos por Banca
-
-## 🧐 **CESPE/CEBRASPE**
-- 🔍 Estilo: **Caçador de Pegadinhas**  
-- Exemplos:  
-  - "CESPE trocou 'podem' por 'devem'... **Achou que eu não veria?**"  
-  - "Isso aqui é lei seca no osso. **Decora ou morre!**"  
-
----
-
-## 📊 **FGV**
-- 📈 Estilo: **Analista de Detalhes**  
-- Exemplos:  
-  - "FGV quer seu sangue nos **detalhes do inciso IV**..."  
-  - "Aqui a banca **não perdoa** interpretação errada!"  
-
----
-
-## 🏛️ **FCC**
-- 📚 Estilo: **Professor Tradicional**  
-- Exemplos:  
-  - "FCC quer o artigo, número e vírgula. **Nada mais, nada menos!**"  
-  - "Decoreba honesta – **sem malandragem**."  
-
----
-
-## 🤠 **Quadrix**
-- 🎵 Estilo: **Sertanejo das Bancas**  
-- Exemplos:  
-  - "Quadrix é simples, mas pega no **refrão**."  
-  - "Cuidado com os **'NÃO' e 'EXCETO'** – eles brilham aqui."  
-
----
-
-## 🎓 **FURG**
-- 🏫 Estilo: **Orientador Institucional**  
-- Exemplos:  
-  - "FURG é **direta e institucional** – sabe o Regimento da universidade?"  
-  - "Aqui a cobrança é **Lei 8.112/90 + normas da FURG**."  
-
-### 📌 Foco da FURG:
-- **Estatuto dos Servidores (Lei 8.112/90)**  
-  - Estágio probatório: **12 meses (Art. 20)**  
-  - Acumulação de cargos: **Art. 37, XVI, CF + Lei 8.112/90**  
-- **Regimento Interno da FURG**  
-  - Estrutura organizacional  
-- **Lei 9.784/99 (Processo Administrativo Federal)**  
-
-### 📖 Exemplo de Questão (FURG)
-> "O Conselho Universitário (CONSUN) da FURG é composto por:"  
-> a) 20 membros  
-> b) **30 membros ✅**  
-> c) 40 membros  
-> *(Fonte: Art. 14 do Regimento da FURG)*  
-
----
-
-# 🔑 Regras Gerais
-- Sempre **citar a fonte legal** → ("Art. 20 da Lei 8.112/90")  
-- Usar **tradução simples** para fixar.  
-- Dar **destaques** com negrito ou listas.  
-- Emojis 🎓📘 podem ser usados para reforçar aprendizado.  
-
----
+- **CESPE/Cebraspe** → Questões de Certo/Errado, anulando se errar. Seja rigoroso.
+- **FGV** → Enunciados longos, interpretativos. Use texto rebuscado.
+- **FCC** → Questões objetivas, pegadinhas sutis.
+- **Quadrix** → Bem diretas, cobrança de letra de lei.
+- **Vunesp** → Questões medianas, foco em literalidade.
+- **IBFC** → Mistura entre direto e interpretativo.
+- **IADES** → Bem próximas das apostilas, estilo previsível.
+- **Cesgranrio** → Bastante interpretação de texto.
+- **FURG** → Banca própria, valoriza contexto regional e leis locais.
+- **CPNU** → Questões modelo ENEM, contextualizadas.
 
 # 🎉 Feedback ao Aluno
-
 ## ✅ Acerto
-- "👏 **Mandou bem!** Até o CONSUN aprovaria essa resposta!"  
-- "Você e a **Lei 8.112/90** – dupla imbatível!"  
+- "👏 **Mandou bem!** Até o CONSUN aprovaria essa resposta!"
+- "Você e a **Lei 8.112/90** – dupla imbatível!"
 
 ## ❌ Erro
-- "⚠️ **Quase!** A FURG adora cobrar esse detalhe do Art. 20..."  
-- "Tranquilo! Agora você sabe que **12 meses** é a chave do estágio probatório."  
-
----
+- "⚠️ **Quase!** A FURG adora cobrar esse detalhe do Art. 20..."
+- "Tranquilo! Agora você sabe que **12 meses** é a chave do estágio probatório."
 
 # 🗓️ Motivação
-- "Lembra quando você não sabia a diferença entre CONSUN e CONSAD? Olha você agora **dominando a FURG!**"  
-- "Hoje é dia de marcar **X** no gabarito! Bora revisar os top 5 artigos da Lei 8.112?"  
+- "Hoje é dia de marcar **X** no gabarito! Bora revisar os top 5 artigos da Lei 8.112?"
+- "Você já venceu editais piores que esse, bora pra cima!"
 """
 
-# Piadas extras
 piadas_concursadas = [
     "📅 Por que o concurseiro não usa relógio? Porque ele já vive no 'tempo regulamentar' do edital!",
     "📖 Sabe como se chama quem estuda Lei 8.112/90 de trás pra frente? Um 211.8 oitól!"
 ]
 
-# Evento de inicialização
+# =============================
+# 📂 Estrutura do Servidor
+# =============================
+server_structure = {
+    "🏛️ Gerais": [
+        "📢-avisos",
+        "💬-bate-papo",
+        "📎-links-úteis"
+    ],
+    "📚 Disciplinas Básicas": [
+        "português",
+        "raciocínio-lógico",
+        "matemática",
+        "informática",
+        "direito-constitucional",
+        "direito-administrativo",
+        "direito-penal",
+        "direito-processual-penal",
+        "direito-civil",
+        "direito-processual-civil",
+        "direitos-humanos",
+        "ética-no-serviço-público",
+        "atualidades"
+    ],
+    "📝 Simulados": [
+        "instruções",
+        "simulados-cespe",
+        "simulados-fgv",
+        "simulados-fcc",
+        "simulados-quadrix",
+        "simulados-furg",
+        "simulados-vunesp",
+        "simulados-ibfc",
+        "simulados-idecan",
+        "simulados-iades",
+        "simulados-cesgranrio",
+        "simulados-cpnu",
+        "simulados-outros"
+    ],
+    "📊 Bancas": [
+        "cespe-cebraspe",
+        "fgv",
+        "fcc",
+        "quadrix",
+        "furg",
+        "vunesp",
+        "ibfc",
+        "idecan",
+        "iades",
+        "cesgranrio",
+        "funrio",
+        "objetiva",
+        "cpnu",
+        "outros"
+    ],
+    "🎯 Concursos Específicos": [
+        "trf4-2025",
+        "tjrs-2025",
+        "pf-agente",
+        "prf-2026"
+    ],
+    "😂 Motivação": [
+        "frases-motivacionais",
+        "piadas-concurseiras"
+    ]
+}
+
+useful_links = [
+    "🔗 PCI Concursos → https://www.pciconcursos.com.br/",
+    "🔗 QConcursos → https://www.qconcursos.com/",
+    "🔗 Drive de Provas Antigas → [adicione seu link aqui]",
+    "🔗 Estratégia Questões → https://questoes.estrategia.com/",
+    "🔗 Gran Cursos Questões → https://questoes.grancursosonline.com.br/"
+]
+
+# =============================
+# 🤖 Eventos
+# =============================
 @bot.event
 async def on_ready():
     print(f"🤖 {bot.user.name} está online! Modo: Professor Concurseiro")
@@ -132,51 +152,112 @@ async def on_ready():
 async def on_message(message):
     if message.author.bot:
         return
-    
-    # Responde a menções
+
     if bot.user.mentioned_in(message):
         user_input = message.content.replace(f"<@{bot.user.id}>", "").strip()
-        
-        # Atualiza histórico (mantém as últimas 5 interações)
         conversation_history.append({"role": "user", "content": user_input})
         if len(conversation_history) > 5:
             conversation_history.pop(0)
-        
+
         try:
-            # Monta a conversa para a IA
             messages = [
                 {"role": "system", "content": BASE_PROMPT},
                 *conversation_history
             ]
-            
-            # Chamada à API Groq
+
             response = groq_client.chat.completions.create(
                 model="llama3-70b-8192",
                 messages=messages,
                 temperature=0.7,
                 max_tokens=500
             )
-            
+
             reply = response.choices[0].message.content
-            
-            # Adiciona humor aleatório (10% de chance)
+
             if random.random() < 0.1:
                 reply += f"\n\n{random.choice(piadas_concursadas)}"
-                
+
             await message.channel.send(reply)
-            
+
         except Exception as e:
             await message.channel.send(f"⚠️ Erro ao gerar resposta: {str(e)}")
 
     await bot.process_commands(message)
 
-# Comando de teste
+# =============================
+# 📂 Comandos
+# =============================
 @bot.command()
 async def piada(ctx):
-    """Envia uma piada de concurseiro"""
     await ctx.send(random.choice(piadas_concursadas))
 
-# --- Servidor Flask fake só pra Render não matar ---
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def setup(ctx):
+    guild = ctx.guild
+    for category_name, channels in server_structure.items():
+        category = discord.utils.get(guild.categories, name=category_name)
+        if not category:
+            category = await guild.create_category(category_name)
+        for channel_name in channels:
+            existing_channel = discord.utils.get(category.channels, name=channel_name)
+            if not existing_channel:
+                await guild.create_text_channel(channel_name, category=category)
+    await ctx.send("✅ Estrutura de estudos criada com sucesso!")
+
+@bot.command()
+async def simulado(ctx, banca: str, *, tema: str = "geral"):
+    try:
+        simulado_prompt = f"""
+        Você é a banca {banca}.
+        Crie 5 questões sobre o tema: {tema}.
+        Use o formato oficial da banca.
+        Depois forneça o gabarito comentado.
+        """
+
+        response = groq_client.chat.completions.create(
+            model="llama3-70b-8192",
+            messages=[
+                {"role": "system", "content": BASE_PROMPT},
+                {"role": "user", "content": simulado_prompt}
+            ],
+            temperature=0.7,
+            max_tokens=1000
+        )
+
+        simulado_text = response.choices[0].message.content
+
+        # Divide em Perguntas e Gabarito
+        if "Gabarito" in simulado_text:
+            partes = simulado_text.split("Gabarito", 1)
+            perguntas = partes[0]
+            gabarito = "Gabarito" + partes[1]
+        else:
+            perguntas = simulado_text
+            gabarito = "(⚠️ A IA não separou gabarito desta vez)"
+
+        embed_perguntas = discord.Embed(
+            title=f"📝 Simulado - {banca.upper()}",
+            description=f"Tema: **{tema}**\n\n{perguntas[:4000]}",
+            color=discord.Color.blue()
+        )
+        embed_perguntas.set_footer(text="Questões geradas com IA para prática 📚")
+
+        embed_gabarito = discord.Embed(
+            title="📖 Gabarito Comentado",
+            description=gabarito[:4000],
+            color=discord.Color.green()
+        )
+
+        await ctx.send(embed=embed_perguntas)
+        await ctx.send(embed=embed_gabarito)
+
+    except Exception as e:
+        await ctx.send(f"⚠️ Erro ao gerar simulado: {str(e)}")
+
+# =============================
+# 🌐 Servidor Flask Fake
+# =============================
 app = Flask(__name__)
 
 @app.route('/')
@@ -188,5 +269,7 @@ def run_web():
 
 threading.Thread(target=run_web).start()
 
-# Rodar bot
+# =============================
+# ▶️ Rodar Bot
+# =============================
 bot.run(DISCORD_TOKEN)
