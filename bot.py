@@ -533,6 +533,7 @@ async def simulado_cmd(ctx: commands.Context, banca: str, *, tema: str = "geral"
         if user_id in sim_sessions:
             return await ctx.send("⚠️ Você já tem um simulado em andamento. Use `!cancelar` para abortar.")
 
+        # cria mensagem "carregando"
         msg = await ctx.send("⏳ Gerando seu simulado...")
 
         try:
@@ -540,18 +541,10 @@ async def simulado_cmd(ctx: commands.Context, banca: str, *, tema: str = "geral"
             raw_data = await gerar_simulado_json(banca_norm, tema)
             data = normalize_simulado(raw_data)
         except json.JSONDecodeError:
-            try:
-                await msg.delete()
-            except Exception:
-                pass
-            return await ctx.send("🔴 Erro: Não consegui formatar o simulado. Tente um tema mais específico.")
+            return await msg.edit(content="🔴 Erro: Não consegui formatar o simulado. Tente um tema mais específico.")
         except Exception as e:
-            try:
-                await msg.delete()
-            except Exception:
-                pass
             log_error(e, "simulado_json")
-            return await ctx.send("⏳ Servidor de IA sobrecarregado. Tente novamente em 1 minuto.")
+            return await msg.edit(content="⏳ Servidor de IA sobrecarregado. Tente novamente em 1 minuto.")
 
         sim_sessions[user_id] = {
             "banca": data["banca"],
@@ -563,15 +556,13 @@ async def simulado_cmd(ctx: commands.Context, banca: str, *, tema: str = "geral"
             "start_time": discord.utils.utcnow()
         }
 
+        # primeira questão
         q0 = data["questoes"][0]
         embed = make_question_embed(0, len(data["questoes"]), data["banca"], data["tema"], q0)
         view = QuestionView(q0, data["formato"])
 
-        try:
-            await msg.delete()
-        except Exception:
-            pass
-        await ctx.send(embed=embed, view=view)
+        # edita mensagem original para virar o simulado
+        await msg.edit(content=None, embed=embed, view=view)
 
     except Exception as e:
         log_error(e, "comando_simulado")
