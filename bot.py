@@ -395,7 +395,6 @@ class QuestionView(discord.ui.View):
                 self.add_item(AnswerButton(label=letter, style=style, custom_id=letter, key=key))
 
 class AnswerButton(discord.ui.Button):
-    """Botão de resposta individual."""
     def __init__(self, label: str, style: discord.ButtonStyle, custom_id: str, key: Tuple[int, int, int]):
         super().__init__(label=label, style=style, custom_id=custom_id)
         self.sim_key = key
@@ -403,42 +402,62 @@ class AnswerButton(discord.ui.Button):
     async def callback(self, interaction: discord.Interaction):
         sess = sim_sessions.get(self.sim_key)
         if not sess:
-            return await interaction.response.send_message("Sessão expirada.", ephemeral=True)
+            return await interaction.response.send_message("⌛ Sessão expirada. Inicie um novo simulado.", ephemeral=True)
         if interaction.user.id != self.sim_key[2]:
-            return await interaction.response.send_message("Este simulado pertence a outro usuário.", ephemeral=True)
+            return await interaction.response.send_message("⚠️ Este simulado pertence a outro usuário.", ephemeral=True)
 
         idx = sess["index"]
         q = sess["data"]["questoes"][idx]
         formato = sess["data"]["formato"]
 
-        # Processa resposta
+        # Processamento da resposta
         if formato == "certo_errado":
             user_answer = "Certo" if self.custom_id == "CERTO" else "Errado"
             correct = q["correta"]
-            correct_bool = (user_answer == correct)
+            user_label = user_answer
+            correct_label = correct
         else:
             user_answer = self.custom_id.upper()
             correct = q["correta"].upper()
-            correct_bool = (user_answer == correct)
+            # Obtém o texto completo das alternativas selecionadas
+            user_label = next((opt for opt in q["opcoes"] if opt.startswith(user_answer + ")"), f"{user_answer}) [Alternativa não encontrada]")
+            correct_label = next((opt for opt in q["opcoes"] if opt.startswith(correct + ")"), f"{correct}) [Alternativa não encontrada]")
 
-        # Atualiza sessão
+        correct_bool = (user_answer == correct)
+
+        # Atualização da sessão
         sess["answers"].append({
             "idx": idx,
             "user": user_answer,
+            "user_label": user_label,
             "correct": correct,
-            "ok": correct_bool
+            "correct_label": correct_label,
+            "ok": correct_bool,
+            "comentario": q.get("comentario", "Sem comentário disponível")
         })
+        
         if correct_bool:
             sess["score"] += 1
 
-        # Feedback
-        feedback = "✅ Correto!" if correct_bool else f"❌ Incorreto. Gabarito: {correct}"
+        # Construção do feedback detalhado
+        feedback_msg = [
+            f"## {'✅ Correto!' if correct_bool else '❌ Incorreto'}",
+            f"**Sua resposta:** {user_label}",
+            f"**Resposta correta:** {correct_label}",
+            "",
+            f"📝 **Comentário:**\n{q.get('comentario', 'Sem fundamentação disponível')}"
+        ]
+
+        # Adiciona alternativas se for múltipla escolha
+        if formato != "certo_errado":
+            feedback_msg.insert(3, "\n**Todas as alternativas:**\n" + "\n".join(q["opcoes"]))
+
         await interaction.response.send_message(
-            f"{feedback}\n\n**Comentário:** {q.get('comentario', 'Sem comentário')}",
+            "\n".join(feedback_msg),
             ephemeral=True
         )
 
-        # Próxima questão ou finaliza
+        # Próxima questão ou finalização
         sess["index"] += 1
         if sess["index"] < len(sess["data"]["questoes"]):
             next_q = sess["data"]["questoes"][sess["index"]]
@@ -451,36 +470,43 @@ class AnswerButton(discord.ui.Button):
             )
             await interaction.message.edit(embed=embed, view=QuestionView(self.sim_key))
         else:
-            # Resultado final
+            # Resultado final detalhado
             total = len(sess["data"]["questoes"])
             score = sess["score"]
+            
             embed = discord.Embed(
-                title=f"🏁 Resultado — Simulado {sess['data']['banca']}",
-                description=f"**Tema:** {sess['data']['tema']}\n\n**Acertos:** {score}/{total}",
+                title=f"📊 Resultado Final - {sess['data']['banca']}",
+                description=(
+                    f"**Tema:** {sess['data']['tema']}\n"
+                    f"**Acertos:** {score}/{total} ({score/total:.0%})\n"
+                    f"**Nível:** {'👍 Aprovado!' if score >= total/2 else '👎 Precisa estudar mais'}"
+                ),
                 color=discord.Color.green() if score >= total/2 else discord.Color.red()
             )
-            
-            # Gabarito
-            gabarito = []
+
+            # Adiciona cada questão com detalhes
             for i, q in enumerate(sess["data"]["questoes"]):
                 resp = sess["answers"][i]
-                status = "✅" if resp["ok"] else "❌"
-                enun = (q["enunciado"][:100] + "...") if len(q["enunciado"]) > 100 else q["enunciado"]
-                gabarito.append(f"**Q{i+1}** {status} — Você: **{resp['user']}** | Gabarito: **{resp['correct']}**\n*{enun}*")
-            
-            # Divide em chunks para evitar overflow
-            for i in range(0, len(gabarito), 3):
-                chunk = gabarito[i:i+3]
+                
+                questao_info = [
+                    f"**Enunciado:** {q['enunciado'][:150]}..." if len(q['enunciado']) > 150 else q['enunciado'],
+                    "",
+                    f"**Sua resposta:** {resp['user_label']}",
+                    f"**Gabarito:** {resp['correct_label']}",
+                    "",
+                    f"**Explicação:** {q.get('comentario', 'Sem comentário disponível')}",
+                    "―" * 30
+                ]
+                
                 embed.add_field(
-                    name="Gabarito" if i == 0 else "Continuação",
-                    value="\n\n".join(chunk),
+                    name=f"Questão {i+1} {'✅' if resp['ok'] else '❌'}",
+                    value="\n".join(questao_info),
                     inline=False
                 )
-            
-            embed.set_footer(text="Revisão concluída. Bons estudos! 🎓")
+
+            embed.set_footer(text="Revise os comentários para consolidar seu aprendizado! 📚")
             await interaction.message.edit(embed=embed, view=None)
             sim_sessions.pop(self.sim_key, None)
-
 @bot.command()
 async def simulado(ctx: commands.Context, banca: str, *, tema: str = "geral"):
     """Inicia um simulado personalizado."""
