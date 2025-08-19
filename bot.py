@@ -1,4 +1,4 @@
-# bot.py - Versão Consolidada e Corrigida
+# bot.py - Versão Consolidada e Corrigida (revisada)
 import os
 import re
 import json
@@ -7,7 +7,7 @@ import asyncio
 import logging
 import threading
 import unicodedata
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List
 
 import discord
 from discord.ext import commands
@@ -16,9 +16,8 @@ from dotenv import load_dotenv
 from flask import Flask
 
 # =============================
-# Configuração Inicial
-# =============================
 # Logging
+# =============================
 logging.basicConfig(
     filename='bot_errors.log',
     level=logging.ERROR,
@@ -29,7 +28,21 @@ logging.basicConfig(
 def log_error(error: Exception, context: str = ""):
     logging.error(f"{context} - {type(error).__name__}: {str(error)}", exc_info=True)
 
-# Flask Keep-Alive
+# =============================
+# Variáveis de Ambiente
+# =============================
+load_dotenv()
+DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
+
+if not DISCORD_TOKEN:
+    raise RuntimeError("Token do Discord ausente (verifique .env)")
+if not GROQ_API_KEY:
+    raise RuntimeError("Token Groq ausente (verifique .env)")
+
+# =============================
+# Flask Keep-Alive (inicia depois de validar env)
+# =============================
 app = Flask(__name__)
 
 @app.route('/')
@@ -48,19 +61,6 @@ def run_web():
 threading.Thread(target=run_web, daemon=True).start()
 
 # =============================
-# Variáveis de Ambiente
-# =============================
-load_dotenv()
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
-
-# Valida de maneira mais robusta (comprimento mínimo)
-if not DISCORD_TOKEN or len(DISCORD_TOKEN) < 50:
-    raise RuntimeError("Token do Discord inválido ou faltando (verifique .env)")
-if not GROQ_API_KEY or len(GROQ_API_KEY) < 30:
-    raise RuntimeError("Token Groq inválido ou faltando (verifique .env)")
-
-# =============================
 # Constantes e Configurações
 # =============================
 BANCAS_VALIDAS = {
@@ -71,17 +71,19 @@ BANCAS_VALIDAS = {
 
 GROQ_MODEL = "llama3-70b-8192"
 groq_client = Groq(api_key=GROQ_API_KEY)
-groq_semaphore = asyncio.Semaphore(5)  # Limite de chamadas simultâneas
+groq_semaphore = asyncio.Semaphore(5)
 
 # =============================
 # Discord Bot
 # =============================
 intents = discord.Intents.default()
-intents.messages = True
 intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(
+    command_prefix="!",
+    intents=intents,
+    allowed_mentions=discord.AllowedMentions.none()
+)
 
-# Histórico simples para menções
 conversation_history: List[Dict[str, str]] = []
 
 # =============================
@@ -182,7 +184,6 @@ server_structure = {
 # Funções Utilitárias
 # =============================
 def slugify_channel_name(name: str) -> str:
-    """Converte nomes para formato válido no Discord."""
     nfkd = unicodedata.normalize("NFKD", name)
     s = "".join(ch for ch in nfkd if not unicodedata.combining(ch))
     s = s.lower()
@@ -193,25 +194,46 @@ def slugify_channel_name(name: str) -> str:
     return s or "canal"
 
 def normalizar_banca(banca: str) -> str:
-    """Padroniza o nome da banca."""
-    banca = banca.upper().strip()
+    banca = (banca or "").upper().strip()
     if banca in {"CESPE", "CEBRASPE"}:
         return "CESPE/CEBRASPE"
     return banca
 
 def validar_banca(banca: str) -> bool:
-    """Verifica se a banca é suportada."""
     b = normalizar_banca(banca)
-    base = { "CESPE/CEBRASPE" if x in {"CESPE","CEBRASPE"} else x for x in BANCAS_VALIDAS }
+    base = {"CESPE/CEBRASPE" if x in {"CESPE", "CEBRASPE"} else x for x in BANCAS_VALIDAS}
     return b in base
 
 def validar_tema(tema: str) -> bool:
-    """Validação básica do tema."""
     tema = (tema or "").strip()
     return 2 <= len(tema) <= 100
 
+def _find_first_json_blob(text: str) -> str:
+    """Extrai o primeiro objeto JSON balanceado por contagem de chaves."""
+    start = text.find("{")
+    if start == -1:
+        raise json.JSONDecodeError("JSON não encontrado", text, 0)
+    depth = 0
+    for i, ch in enumerate(text[start:], start=start):
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i+1]
+    raise json.JSONDecodeError("JSON malformado", text, start)
+
+def extract_json(text: str) -> Any:
+    # tenta blocos em ```...```
+    fence = re.search(r"```(?:json)?\s*(.+?)\s*```", text, flags=re.S | re.I)
+    cand = fence.group(1) if fence else text
+    try:
+        return json.loads(cand)
+    except Exception:
+        blob = _find_first_json_blob(cand)
+        return json.loads(blob)
+
 async def chat_groq(messages: List[Dict[str, str]], max_tokens: int = 700, temperature: float = 0.6) -> str:
-    """Chamada à API Groq com limitação de concorrência."""
     async with groq_semaphore:
         try:
             resp = await asyncio.to_thread(
@@ -225,21 +247,6 @@ async def chat_groq(messages: List[Dict[str, str]], max_tokens: int = 700, tempe
         except Exception as e:
             log_error(e, "chat_groq")
             raise
-
-def extract_json(text: str) -> Any:
-    """Extrai JSON de blocos de código ou texto puro."""
-    patterns = [
-        r"```json\s*(\{.*?\})\s*```",
-        r"```+\s*(\{.*?\})\s*```+"
-    ]
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.S | re.I)
-        if match:
-            try:
-                return json.loads(match.group(1))
-            except json.JSONDecodeError:
-                continue
-    return json.loads(text)
 
 # =============================
 # Simulado - Geração
@@ -274,13 +281,20 @@ async def gerar_simulado_json(banca: str, tema: str) -> Dict[str, Any]:
         raise
 
 def normalize_simulado(data: Dict[str, Any]) -> Dict[str, Any]:
-    """Garante estrutura consistente do simulado."""
-    banca = normalizar_banca((data.get("banca") or "").upper())
-    formato = data.get("formato", "multipla_escolha")
-    tema = data.get("tema", "geral")
-    questoes = data.get("questoes", [])[:5]
+    banca = normalizar_banca(str((data.get("banca") or "")).upper())
+    formato = str(data.get("formato", "multipla_escolha")).lower().replace("/", "_").replace("-", "_").strip()
+    tema = str(data.get("tema", "geral")).strip()
 
-    # Preenche com questões padrão se necessário
+    if banca == "CESPE/CEBRASPE":
+        formato = "certo_errado"
+    elif formato not in {"multipla_escolha", "certo_errado"}:
+        formato = "multipla_escolha"
+
+    questoes = data.get("questoes", [])
+    if not isinstance(questoes, list):
+        questoes = []
+    questoes = questoes[:5]
+
     while len(questoes) < 5:
         questoes.append({
             "enunciado": "Questão adicional (placeholder).",
@@ -289,42 +303,33 @@ def normalize_simulado(data: Dict[str, Any]) -> Dict[str, Any]:
             "comentario": "Comentário não fornecido pela IA."
         })
 
-    # Normaliza alternativas e campos
     for q in questoes:
         q["enunciado"] = str(q.get("enunciado", "Sem enunciado")).strip()
         if formato == "certo_errado":
             q["opcoes"] = ["Certo", "Errado"]
-            q["correta"] = "Certo" if q.get("correta") not in ["Certo", "Errado"] else q["correta"]
+            cor = str(q.get("correta", "")).strip().capitalize()
+            q["correta"] = cor if cor in {"Certo", "Errado"} else "Certo"
         else:
-            ops = [re.sub(r"^[A-Ea-e]\)\s*", "", str(s)).strip() for s in (q.get("opcoes") or [])][:5]
+            raw_ops = q.get("opcoes") or []
+            ops = [re.sub(r"^[A-Ea-e]\)\s*", "", str(s)).strip() for s in raw_ops][:5]
             while len(ops) < 5:
                 ops.append("—")
             q["opcoes"] = [f"{chr(65+i)}) {ops[i]}" for i in range(5)]
-            q["correta"] = (q.get("correta") or "A").upper()
-            if q["correta"] not in list("ABCDE"):
-                q["correta"] = "A"
+            cor = str(q.get("correta", "A")).strip().upper()[:1]
+            q["correta"] = cor if cor in "ABCDE" else "A"
         if not q.get("comentario"):
             q["comentario"] = "Comentário não fornecido pela IA."
 
-    return {
-        "banca": banca,
-        "formato": formato,
-        "tema": tema,
-        "questoes": questoes
-    }
+    return {"banca": banca, "formato": formato, "tema": tema, "questoes": questoes}
 
 def make_question_embed(idx: int, total: int, banca: str, tema: str, q: Dict[str, Any]) -> discord.Embed:
-    """Cria embed para questões."""
     embed = discord.Embed(
         title=f"📝 Simulado {banca} — Q{idx+1}/{total}",
         description=f"**Tema:** {tema}\n\n**Enunciado:** {q['enunciado']}",
         color=discord.Color.blurple()
     )
     if q.get("opcoes"):
-        if isinstance(q["opcoes"], list):
-            opts_text = "\n".join(q["opcoes"])
-        else:
-            opts_text = str(q["opcoes"])
+        opts_text = "\n".join(q["opcoes"]) if isinstance(q["opcoes"], list) else str(q["opcoes"])
         embed.add_field(name="Alternativas", value=opts_text, inline=False)
     embed.set_footer(text="Clique nos botões para responder.")
     return embed
@@ -332,15 +337,13 @@ def make_question_embed(idx: int, total: int, banca: str, tema: str, q: Dict[str
 # =============================
 # Sessões de Simulado
 # =============================
-# chave: user_id (str)  → sessão
 sim_sessions: Dict[str, Dict[str, Any]] = {}
 
 # =============================
-# UI: Botões e Views (únicas)
+# UI: Botões e Views
 # =============================
 class AnswerButton(discord.ui.Button):
     def __init__(self, label: str, custom_id: str):
-        # label mostrado no botão; custom_id é a letra (A..E) ou "CERTO"/"ERRADO"
         super().__init__(label=label, style=discord.ButtonStyle.primary, custom_id=custom_id)
 
     async def callback(self, interaction: discord.Interaction):
@@ -348,29 +351,25 @@ class AnswerButton(discord.ui.Button):
         session = sim_sessions.get(user_id)
 
         if not session or session["current"] >= len(session["questions"]):
-            await interaction.response.send_message("⚠️ Sessão não encontrada ou expirada.", ephemeral=True)
+            await interaction.response.send_message("⚠️ Sessão não encontrada ou expirada (ou não é sua).", ephemeral=True)
             return
 
         idx = session["current"]
         q = session["questions"][idx]
         formato = session["formato"]
 
-        # Resposta do usuário
         user_answer = self.custom_id  # "A".."E" ou "Certo"/"Errado"
         correct = q["correta"]
 
-        # Mapeia rótulos completos
         if formato == "certo_errado":
             user_label = user_answer
             correct_label = correct
             is_correct = (user_answer == correct)
         else:
-            # encontra "A) texto"
             user_label = next((opt for opt in q["opcoes"] if opt.startswith(f"{user_answer})")), f"{user_answer}) [não encontrada]")
             correct_label = next((opt for opt in q["opcoes"] if opt.startswith(f"{correct})")), f"{correct}) [não encontrada]")
             is_correct = (user_answer.upper() == correct.upper())
 
-        # Registra
         session["answers"].append({
             "idx": idx,
             "user": user_answer,
@@ -381,13 +380,19 @@ class AnswerButton(discord.ui.Button):
             "comentario": q.get("comentario", "Sem comentário disponível")
         })
 
-        # Feedback imediato
-        if is_correct:
-            await interaction.response.send_message("✅ Resposta correta!", ephemeral=True)
-        else:
-            await interaction.response.send_message(f"❌ Resposta incorreta. Gabarito: {correct_label}", ephemeral=True)
+        # Responde e desabilita a view atual para evitar duplo clique
+        await interaction.response.send_message("✅ Resposta correta!" if is_correct else f"❌ Incorreta. Gabarito: {correct_label}", ephemeral=True)
+        try:
+            if interaction.message and interaction.message.components:
+                v = self.view
+                if v:
+                    for child in v.children:
+                        if isinstance(child, discord.ui.Button):
+                            child.disabled = True
+                    await interaction.message.edit(view=v)
+        except Exception as e:
+            log_error(e, "disable_buttons")
 
-        # Próxima
         session["current"] += 1
         if session["current"] < len(session["questions"]):
             await enviar_proxima_questao(interaction, user_id)
@@ -401,7 +406,6 @@ class QuestionView(discord.ui.View):
             self.add_item(AnswerButton(label="Certo", custom_id="Certo"))
             self.add_item(AnswerButton(label="Errado", custom_id="Errado"))
         else:
-            # Para múltipla escolha, botões com letras A–E
             for letter in "ABCDE":
                 self.add_item(AnswerButton(label=letter, custom_id=letter))
 
@@ -433,7 +437,7 @@ async def finalizar_simulado(interaction: discord.Interaction, user_id: str):
     )
 
     for i, q in enumerate(session["questions"]):
-        if i >= 25:  # limite do Discord
+        if i >= 25:
             embed.add_field(name="…", value="*Muitas questões para detalhar em um único embed.*", inline=False)
             break
         resp = session["answers"][i]
@@ -449,8 +453,6 @@ async def finalizar_simulado(interaction: discord.Interaction, user_id: str):
 
     embed.set_footer(text="Revise os comentários para consolidar seu aprendizado! 📚")
     await interaction.channel.send(embed=embed)
-
-    # Encerra sessão
     sim_sessions.pop(user_id, None)
 
 # =============================
@@ -465,9 +467,14 @@ async def on_message(message: discord.Message):
     if message.author.bot:
         return
 
-    # Resposta quando for mencionado @bot
-    if bot.user.mentioned_in(message):
-        user_input = message.content.replace(f"<@{bot.user.id}>", "").strip()
+    # menções <@id> e <@!id>
+    mentioned = any(u.id == bot.user.id for u in message.mentions)
+    if mentioned:
+        cleaned = message.content
+        cleaned = cleaned.replace(f"<@{bot.user.id}>", "")
+        cleaned = cleaned.replace(f"<@!{bot.user.id}>", "")
+        user_input = cleaned.strip()
+
         conversation_history.append({"role": "user", "content": user_input})
         if len(conversation_history) > 6:
             conversation_history.pop(0)
@@ -489,13 +496,11 @@ async def on_message(message: discord.Message):
 # =============================
 @bot.command()
 async def piada(ctx: commands.Context):
-    """Envia uma piada de concurseiro."""
     await ctx.send(random.choice(piadas_concursadas))
 
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def setup(ctx: commands.Context):
-    """Configura a estrutura do servidor."""
     guild = ctx.guild
     if not guild:
         return await ctx.send("⚠️ Rode este comando dentro de um servidor.")
@@ -514,12 +519,7 @@ async def setup(ctx: commands.Context):
 
 @bot.command(name="simulado")
 async def simulado_cmd(ctx: commands.Context, banca: str, *, tema: str = "geral"):
-    """Inicia um simulado personalizado.
-    Uso: !simulado FGV Direito Administrativo
-    Para CESPE/CEBRASPE o formato é Certo/Errado. Demais bancas: A–E.
-    """
     try:
-        # Validação
         if not validar_banca(banca):
             bancas = ", ".join(sorted(BANCAS_VALIDAS))
             return await ctx.send(
@@ -533,7 +533,6 @@ async def simulado_cmd(ctx: commands.Context, banca: str, *, tema: str = "geral"
         if user_id in sim_sessions:
             return await ctx.send("⚠️ Você já tem um simulado em andamento. Use `!cancelar` para abortar.")
 
-        # Feedback
         msg = await ctx.send("⏳ Gerando seu simulado...")
 
         try:
@@ -541,14 +540,19 @@ async def simulado_cmd(ctx: commands.Context, banca: str, *, tema: str = "geral"
             raw_data = await gerar_simulado_json(banca_norm, tema)
             data = normalize_simulado(raw_data)
         except json.JSONDecodeError:
-            await msg.delete()
+            try:
+                await msg.delete()
+            except Exception:
+                pass
             return await ctx.send("🔴 Erro: Não consegui formatar o simulado. Tente um tema mais específico.")
         except Exception as e:
-            await msg.delete()
+            try:
+                await msg.delete()
+            except Exception:
+                pass
             log_error(e, "simulado_json")
             return await ctx.send("⏳ Servidor de IA sobrecarregado. Tente novamente em 1 minuto.")
 
-        # Inicia sessão
         sim_sessions[user_id] = {
             "banca": data["banca"],
             "formato": data["formato"],
@@ -559,12 +563,14 @@ async def simulado_cmd(ctx: commands.Context, banca: str, *, tema: str = "geral"
             "start_time": discord.utils.utcnow()
         }
 
-        # Primeira questão
         q0 = data["questoes"][0]
         embed = make_question_embed(0, len(data["questoes"]), data["banca"], data["tema"], q0)
         view = QuestionView(q0, data["formato"])
 
-        await msg.delete()
+        try:
+            await msg.delete()
+        except Exception:
+            pass
         await ctx.send(embed=embed, view=view)
 
     except Exception as e:
@@ -573,7 +579,6 @@ async def simulado_cmd(ctx: commands.Context, banca: str, *, tema: str = "geral"
 
 @bot.command(name="resultado")
 async def resultado(ctx: commands.Context):
-    """Mostra o resultado parcial/final do simulado atual."""
     user_id = str(ctx.author.id)
     session = sim_sessions.get(user_id)
     if not session:
@@ -589,7 +594,6 @@ async def resultado(ctx: commands.Context):
 
 @bot.command(name="cancelar")
 async def cancelar_simulado(ctx: commands.Context):
-    """Cancela o simulado atual."""
     user_id = str(ctx.author.id)
     if user_id in sim_sessions:
         sim_sessions.pop(user_id)
@@ -598,7 +602,7 @@ async def cancelar_simulado(ctx: commands.Context):
         await ctx.send("⚠️ Você não tem simulado em andamento.")
 
 # =============================
-# Tratamento de Erros Global
+# Erros Globais
 # =============================
 @bot.event
 async def on_command_error(ctx: commands.Context, error: commands.CommandError):
